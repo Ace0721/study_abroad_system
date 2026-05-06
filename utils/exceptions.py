@@ -1,7 +1,26 @@
 class BusinessRuleError(Exception):
-    """业务规则错误。"""
+    """Business rule error."""
 
 
 class ServiceNotReadyError(Exception):
-    """阶段性骨架方法未实现。"""
+    """Service method is not implemented or not ready."""
 
+
+class AIServiceError(Exception):
+    """AI assistant service error."""
+
+
+class AIConnectionError(AIServiceError):
+    """Cannot connect to local Ollama endpoint."""
+
+
+class AIModelNotFoundError(AIServiceError):
+    """Requested local model is not available."""
+
+
+class AITimeoutError(AIServiceError):
+    """AI request timed out."""
+
+
+class AIResponseFormatError(AIServiceError):
+    """AI response format cannot be parsed reliably."""

@@ -19,10 +19,11 @@ from PySide6.QtWidgets import (
 
 from services.application_service import ApplicationService
 from services.base_data_service import BaseDataService
+from services.llm_ai_service import LLMAIService
 from services.review_service import ReviewService
 from services.school_service import SchoolService
 from utils.enums import ApplicationStatus
-from utils.exceptions import BusinessRuleError, ServiceNotReadyError
+from utils.exceptions import AIServiceError, BusinessRuleError, ServiceNotReadyError
 from utils.messages import show_error, show_success, show_warning
 
 
@@ -79,6 +80,12 @@ def _create_readonly_text() -> QTextEdit:
     return widget
 
 
+def _format_items(items: list[str]) -> str:
+    if not items:
+        return "- None"
+    return "\n".join([f"- {item}" for item in items])
+
+
 class BaseStatusTableTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -130,11 +137,17 @@ class AgentCreateTab(QWidget):
         form.addRow("成绩单路径", self.transcript_path_edit)
 
         self.submit_button = QPushButton("创建并提交申请")
+        self.ai_precheck_button = QPushButton("AI预审")
         self.submit_button.clicked.connect(self._on_submit_clicked)
+        self.ai_precheck_button.clicked.connect(self._on_ai_precheck_clicked)
         self.university_combo.currentIndexChanged.connect(self._on_university_changed)
 
         layout.addLayout(form)
-        layout.addWidget(self.submit_button, alignment=Qt.AlignmentFlag.AlignRight)
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        action_row.addWidget(self.ai_precheck_button)
+        action_row.addWidget(self.submit_button)
+        layout.addLayout(action_row)
 
     def _load_universities(self) -> None:
         self.university_combo.clear()
@@ -155,18 +168,7 @@ class AgentCreateTab(QWidget):
                 self.major_combo.addItem(_major_display(major), major.id)
 
     def _on_submit_clicked(self) -> None:
-        payload = {
-            "agent_user_id": self.user_ctx.user_id,
-            "student_code": self.student_code_edit.text().strip(),
-            "student_name": self.student_name_edit.text().strip(),
-            "current_school": self.current_school_edit.text().strip(),
-            "email": self.email_edit.text().strip(),
-            "phone": self.phone_edit.text().strip(),
-            "university_id": self.university_combo.currentData(),
-            "major_id": self.major_combo.currentData(),
-            "self_statement": self.self_statement_edit.toPlainText().strip(),
-            "transcript_path": self.transcript_path_edit.text().strip(),
-        }
+        payload = self._build_application_payload()
         with self.session_factory() as session:
             service = ApplicationService(session)
             try:
@@ -178,6 +180,36 @@ class AgentCreateTab(QWidget):
                 show_warning(self, str(exc))
             except Exception as exc:
                 show_error(self, f"提交失败：{exc}")
+
+    def _build_application_payload(self) -> dict:
+        return {
+            "agent_user_id": self.user_ctx.user_id,
+            "student_code": self.student_code_edit.text().strip(),
+            "student_name": self.student_name_edit.text().strip(),
+            "current_school": self.current_school_edit.text().strip(),
+            "email": self.email_edit.text().strip(),
+            "phone": self.phone_edit.text().strip(),
+            "university_id": self.university_combo.currentData(),
+            "major_id": self.major_combo.currentData(),
+            "self_statement": self.self_statement_edit.toPlainText().strip(),
+            "transcript_path": self.transcript_path_edit.text().strip(),
+        }
+
+    def _on_ai_precheck_clicked(self) -> None:
+        try:
+            result = LLMAIService().analyze_application(self._build_application_payload())
+            message = (
+                "AI预审结果\n"
+                f"预审结论：{result['conclusion']}\n"
+                f"风险等级：{result['risk_level']}\n\n"
+                f"问题列表：\n{_format_items(result['issues'])}\n\n"
+                f"修改建议：\n{_format_items(result['suggestions'])}"
+            )
+            show_success(self, message)
+        except AIServiceError as exc:
+            show_warning(self, f"AI服务不可用：{exc}")
+        except Exception as exc:
+            show_error(self, f"AI预审失败：{exc}")
 
 
 class AgentListTab(BaseStatusTableTab):
@@ -307,6 +339,8 @@ class AgentFeedbackTab(BaseStatusTableTab):
         feedback_layout.addRow("反馈内容", self.feedback_content_view)
         feedback_layout.addRow("建议专业", self.suggested_major_view)
         layout.addWidget(feedback_box)
+        self.ai_feedback_button = QPushButton("AI解读反馈")
+        layout.addWidget(self.ai_feedback_button, alignment=Qt.AlignmentFlag.AlignRight)
 
         action_box = QGroupBox("反馈后处理动作")
         action_layout = QGridLayout(action_box)
@@ -328,6 +362,7 @@ class AgentFeedbackTab(BaseStatusTableTab):
 
         self.resubmit_major_button.clicked.connect(self._resubmit_major)
         self.transfer_button.clicked.connect(self._transfer)
+        self.ai_feedback_button.clicked.connect(self._on_ai_interpret_feedback_clicked)
 
     def _selected_application_id(self) -> int | None:
         row = self.table.currentRow()
@@ -452,6 +487,39 @@ class AgentFeedbackTab(BaseStatusTableTab):
             except Exception as exc:
                 show_error(self, f"处理失败：{exc}")
         self.refresh_table()
+
+    def _on_ai_interpret_feedback_clicked(self) -> None:
+        app_id = self._selected_application_id()
+        if not app_id:
+            show_warning(self, "请先选择一条反馈申请。")
+            return
+
+        feedback_text = self.feedback_content_view.toPlainText().strip()
+        if not feedback_text or feedback_text == "暂无反馈":
+            show_warning(self, "当前申请暂无可解读的反馈内容。")
+            return
+
+        application_data = {
+            "application_id": app_id,
+            "university_id": self._selected_university_id(),
+            "major_id": self.table.item(self.table.currentRow(), 5).text() if self.table.currentRow() >= 0 else "",
+            "status": self.table.item(self.table.currentRow(), 6).text() if self.table.currentRow() >= 0 else "",
+        }
+        try:
+            result = LLMAIService().summarize_feedback(feedback_text, application_data=application_data)
+            message = (
+                "AI反馈解读\n"
+                f"反馈类型：{result['feedback_type']}\n"
+                f"建议改专业：{'是' if result['suggest_change_major'] else '否'}\n"
+                f"建议跨校转申：{'是' if result['suggest_transfer_university'] else '否'}\n\n"
+                f"核心原因：\n{_format_items(result['core_reasons'])}\n\n"
+                f"建议动作：\n{_format_items(result['recommended_actions'])}"
+            )
+            show_success(self, message)
+        except AIServiceError as exc:
+            show_warning(self, f"AI服务不可用：{exc}")
+        except Exception as exc:
+            show_error(self, f"AI反馈解读失败：{exc}")
 
 
 class ReviewerPendingTab(BaseStatusTableTab):
@@ -649,13 +717,16 @@ class SchoolPendingTab(BaseStatusTableTab):
         row = QHBoxLayout()
         self.reserve_button = QPushButton("占位批准")
         self.feedback_button = QPushButton("反馈建议")
+        self.ai_next_action_button = QPushButton("AI下一步建议")
         row.addStretch(1)
+        row.addWidget(self.ai_next_action_button)
         row.addWidget(self.reserve_button)
         row.addWidget(self.feedback_button)
         layout.addLayout(row)
 
         self.reserve_button.clicked.connect(self._reserve)
         self.feedback_button.clicked.connect(self._feedback)
+        self.ai_next_action_button.clicked.connect(self._on_ai_next_action_clicked)
         self._load_school_majors()
 
     def _load_school_majors(self) -> None:
@@ -779,6 +850,52 @@ class SchoolPendingTab(BaseStatusTableTab):
             except Exception as exc:
                 show_error(self, f"反馈失败：{exc}")
         self.refresh_table()
+
+    def _on_ai_next_action_clicked(self) -> None:
+        app_id = self._selected_application_id()
+        if not app_id:
+            show_warning(self, "请先选择一条申请。")
+            return
+
+        application_data = {
+            "application_id": app_id,
+            "application_no": self.detail_application_no.text().strip(),
+            "student_name": self.detail_student_name.text().strip(),
+            "status": self.detail_status.text().strip(),
+            "university": self.detail_university.text().strip(),
+            "major": self.detail_major.text().strip(),
+            "review_comment": self.detail_review_comment.toPlainText().strip(),
+            "school_feedback": self.detail_feedback_comment.toPlainText().strip(),
+        }
+        quota_info: dict = {}
+        with self.session_factory() as session:
+            dashboard = SchoolService(session).get_quota_dashboard(self.user_ctx.university_id)
+            uni = dashboard.get("university")
+            if uni:
+                quota_info = {
+                    "university_total_quota": uni.total_quota,
+                    "university_used_quota": uni.used_quota,
+                    "university_left_quota": uni.total_quota - uni.used_quota,
+                }
+
+        try:
+            result = LLMAIService().suggest_next_action(
+                application_data=application_data,
+                role_code=self.user_ctx.role_code,
+                quota_info=quota_info,
+            )
+            message = (
+                "AI下一步建议\n"
+                f"推荐动作：{result['recommended_next_action']}\n\n"
+                f"可/不可操作解释：\n{_format_items(result['operation_explanations'])}\n\n"
+                f"原因说明：\n{_format_items(result['reasoning'])}\n\n"
+                f"备选动作：\n{_format_items(result['alternatives'])}"
+            )
+            show_success(self, message)
+        except AIServiceError as exc:
+            show_warning(self, f"AI服务不可用：{exc}")
+        except Exception as exc:
+            show_error(self, f"AI建议生成失败：{exc}")
 
 
 class SchoolQuotaTab(QWidget):

@@ -8,5 +8,11 @@ DB_DIR = BASE_DIR / "database"
 DB_PATH = DB_DIR / "study_abroad.db"
 DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
-# SQLite 配置：课程作业单机模式，保留 WAL 以提升稳定性。
+# SQLite config.
 SQLITE_CONNECT_ARGS = {"check_same_thread": False}
+
+# Local Ollama + DeepSeek settings for AI assistant.
+OLLAMA_OPENAI_BASE_URL = "http://localhost:11434/v1/"
+OLLAMA_OPENAI_API_KEY = "ollama"
+OLLAMA_DEEPSEEK_MODEL = "deepseek-r1:8b"
+OLLAMA_TIMEOUT_SECONDS = 30
